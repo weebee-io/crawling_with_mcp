@@ -73,15 +73,119 @@ def get_db_connection():
 import re
 
 def clean_description(text: str) -> str:
+    """뉴스 기사 본문을 정제하여 순수 기사 내용만 추출
+    
+    다음과 같은 불필요한 내용을 제거:    
+    1. '사진=' 이후 텍스트
+    2. '<편집자 주>' 및 관련 내용
+    3. '기자 페이지', '원문 보기' 등의 참조 문구
+    4. 기자 연락처 정보 (이메일 등)
+    5. 불필요한 줄바꿈과 공백
+    6. 기사 끝에 붙는 안내 문구
+    """
     if not isinstance(text, str):
         return text
+    
+    # 1. '사진=' 이후 내용 자르기
+    photo_pattern = re.compile(r'사진\s*=\s*[^\n]*')
+    photo_match = photo_pattern.search(text)
+    if photo_match:
+        text = text[: photo_match.start()].strip()
+    
+    # 2. 편집자 주 제거
+    editor_note_pattern = re.compile(r'<[^>]*편집[^>]*주[^>]*>.*?(?=<|$)', re.DOTALL)
+    text = editor_note_pattern.sub('', text)
+    
+    # 3. 참조 문구 제거
+    reference_patterns = [
+        r'\b원문\s*보기\b.*$',
+        r'\b기자\s*페이지\b.*$',
+        r'(?:\d+년\s*)?\d+월\s*\d+일\s*기자\b.*$',
+        r'.*\b구독과\s*응원을\s*눌러\s*주시면\b.*$',
+        r'.*\b재미있는\s*종목\s*기사\s*많이\s*쓰겠습니다\b.*$',
+        r'.*\b기사를\s*매번\s*빠르게\s*확인하실\s*수\s*있습니다\b.*$',
+    ]
+    for pattern in reference_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL)
+    
+    # 4. 이메일 주소 및 기자 정보 제거
+    email_pattern = re.compile(r'\S+@\S+\.\S+\s*')
+    text = email_pattern.sub('', text)
+    reporter_pattern = re.compile(r'\b[가-힣]{2,3}\s*기자\b\s*$')
+    text = reporter_pattern.sub('', text)
+    
+    # 5. 기자 바이라인 제거
+    byline_pattern = re.compile(r'^[가-힣]{2,3}\s+기자\s+', re.MULTILINE)
+    text = byline_pattern.sub('', text)
+    
+    # 6. 코인데스크/추가 광고 제거
+    ad_patterns = [
+        r'\[\s*코인데스크\s*\].*?(?=\n\n|비트코인|가상화폐|이더리움|$)',
+        r'.*\b무료구독\b.*$',
+        r'.*\b구독신청\b.*$',
+        r'.*\b구독하기\b.*$',
+        r'.*\b알림설정\b.*$',
+        r'.*\b추천종목\b.*$',
+        r'.*\b무료체험\b.*$',
+    ]
+    for pattern in ad_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL)
+        
+    # 7. 사이트별 특수 문구 제거
+    site_keywords = [
+        r'\b[가-힣]+\s+자료사진\s*=\s*.*?(?=\n|$)',  # 자료사진 출처 문구
+        r'^[가-힣]+\s+\b투자투자투자\b.*?(?=\n|$)',  # 기호 반복
+        r'^[가-힣]+\s+\b구독신청\b.*?(?=\n|$)',  # 구독 관련
+    ]
+    for pattern in site_keywords:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
 
-    pattern = re.compile(r'사진\s*=[^\n]*')
-    match = pattern.search(text)
-    if match:
-        return text[: match.start()].strip()
-    else:
-        return text
+    # 8. 특수 태그 제거
+    text = re.sub(r'<[^>]+>', '', text)
+    
+    # 9. 기사 본문 문단 정리 및 출처 제거
+    lines = text.split('\n')
+    cleaned_lines = []
+    content_started = False
+    current_paragraph = []
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:  # 빈 줄 처리
+            if current_paragraph:  # 기존 문단 있으면 추가
+                cleaned_lines.append(' '.join(current_paragraph))
+                current_paragraph = []
+            continue
+            
+        # 사진/자료/출처 설명 문장 스킵
+        if any(term in line for term in ['사진=', '자료=', '출처=', '사진제공=']):
+            continue
+        
+        # 기사 본문으로 판단
+        if len(line) > 30 or content_started or i > 2:  # 처음 뮇줄 이후에는 본문으로 간주
+            content_started = True
+            
+            # 마지막 문단 관련 스킵 조건
+            if i >= len(lines) - 3 and any(term in line for term in ['세종=', '에디터=', '중앙일보=', '한국경제=', '연탕=']):
+                continue
+                
+            # 이메일 주소나 기자명+기자 형태 텍스트 제외
+            if '@' in line or re.search(r'[가-힣]{2,3}\s+기자', line):
+                continue
+                
+            current_paragraph.append(line)  # 현재 문단에 추가
+
+    # 마지막 문단 처리
+    if current_paragraph:
+        cleaned_lines.append(' '.join(current_paragraph))
+    
+    # 10. 문단형 유지하여 재구성 - 문단 사이에 줄바꿈 두 번
+    text = '\n\n'.join(cleaned_lines)
+    
+    # 11. 문단 내 공백 정리 (문단 작업은 유지)
+    text = re.sub(r'[ \t]+', ' ', text).strip()  # 가로 공백만 하나로 정리
+    
+    return text
 
 # 데코레이터: 예외 발생 시 로깅
 def error_handler(func):
@@ -171,14 +275,17 @@ def fetch_kor_rss_news():
 
     rss_urls = [
         "https://www.hankyung.com/feed/finance",
-        "https://www.hankyung.com/feed/realestate",
-        "https://www.hankyung.com/feed/economy"
+        "https://www.hankyung.com/feed/realestate", 
+        "https://www.hankyung.com/feed/economy",
+        "https://www.hankyung.com/feed/stock",       # 주식 추가
+        "https://www.hankyung.com/feed/international", # 금융 관련 국제뉴스 추가
+        "https://www.hankyung.com/feed/it"           # IT경제 추가
     ]
-
-    # 항상 “지금으로부터 3일 전”을 기준으로 삼는다
+    
+    # 기간 확장: 지금으로부터 7일 전까지의 기사 포함
     now = datetime.now()
-    last_saved = now - timedelta(days=3)
-    logger.info(f"한경RSS: 지난 3일 기준(3일 전 시각) → {last_saved}")
+    last_saved = now - timedelta(days=7)  # 3일에서 7일로 확장
+    logger.info(f"한경 RSS: 지난 7일 기준(7일 전 시각) → {last_saved}")
 
     # 필터링할 한글 키워드 (필요하다면 적절히 확장)
     finance_terms = [
@@ -220,14 +327,176 @@ def fetch_kor_rss_news():
             if not any(term in combined_text for term in finance_terms):
                 continue
 
-            # ③ 본문 크롤링 (newspaper)
-            try:
-                article = Article(link, language='ko')
-                article.download()
-                article.parse()
-                raw_description = article.text.strip()
-            except Exception as e:
-                logger.error(f"[한경] 본문 크롤링 실패: {link} - {e}")
+            # ④ 본문 크롤링 - 다양한 방법 시도
+            import requests
+            from bs4 import BeautifulSoup
+            import re
+            
+            raw_description = ""
+            success = False
+            
+            # 방법 1: newspaper 라이브러리 사용 (최대 3회 재시도)
+            max_retries = 3
+            retry_count = 0
+            
+            while retry_count < max_retries and not success:
+                try:
+                    article = Article(link, language='ko')
+                    article.download()
+                    time.sleep(0.5)  # 다운로드 후 짧은 대기
+                    article.parse()
+                    raw_description = article.text.strip()
+                    
+                    # 내용이 충분히 있으면 성공
+                    if len(raw_description) > 500:
+                        logger.info(f"[한경] newspaper로 성공적으로 크롤링: {link} - 길이: {len(raw_description)}")
+                        success = True
+                        break
+                    
+                    logger.warning(f"[한경] newspaper 본문이 너무 짧음, 재시도 {retry_count+1}/3: {link} - 길이: {len(raw_description)}")
+                except Exception as e:
+                    logger.error(f"[한경] newspaper 크롤링 실패, 재시도 {retry_count+1}/3: {link} - {e}")
+                
+                retry_count += 1
+                time.sleep(1)  # 재시도 전 대기
+            
+            # 방법 2: 한경 사이트 특화 크롤링 (newspaper가 실패한 경우)
+            if not success:
+                try:
+                    logger.info(f"[한경] 특화 크롤링 시도: {link}")
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+                    }
+                    response = requests.get(link, headers=headers, timeout=10)
+                    response.raise_for_status()
+                    
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # 한경 기사 본문 추출 - 여러 형태의 구조 체크
+                    article_body = None
+                    
+                    # 한경 뉴스 사이트의 다양한 레이아웃 구조에 대응
+                    # 다양한 CSS 선택자로 본문 영역 찾기
+                    selectors = [
+                        '.article-body', '#articletxt', '.text-article', 
+                        '.article-text', '.article-view-content', '.article-body-content',
+                        '.news-body-text', '#articleBody', '#newsView', '#newsContent',
+                        '.cont_art', '.art_cont', '.article_cont', '.atc-content',
+                        '#article_body', '.article_view_contents', '#adiContents'
+                    ]
+                    
+                    # 각 선택자를 순회하며 본문 찾기
+                    article_body = None
+                    for selector in selectors:
+                        article_body = soup.select_one(selector)
+                        if article_body and len(article_body.get_text().strip()) > 200:
+                            logger.info(f"[한경] 선택자 '{selector}'로 본문 발견")
+                            break
+                    
+                    # 선택자로 본문을 찾지 못한 경우
+                    if not article_body or len(article_body.get_text().strip()) < 200:
+                        logger.warning(f"[한경] 선택자로 기사 본문을 찾지 못함: {link}")
+                        
+                        # 대안 방법 1: 긴 글이 있는 p 태그 추출
+                        paragraphs = soup.select('p')
+                        valid_paragraphs = [p.get_text().strip() for p in paragraphs 
+                                          if p.get_text().strip() and len(p.get_text().strip()) > 50]
+                        
+                        if valid_paragraphs and len('\n\n'.join(valid_paragraphs)) > 300:
+                            raw_description = '\n\n'.join(valid_paragraphs)
+                            success = True
+                            logger.info(f"[한경] p 태그 추출로 성공: {link} - 길이: {len(raw_description)}")
+                        else:
+                            # 대안 방법 2: 긴 텍스트 블록 찾기
+                            content_blocks = []
+                            for tag in soup.select('div, article, section'):
+                                text = tag.get_text().strip()
+                                if len(text) > 300 and not any(term in text.lower() for term in ['cookie', 'javascript', 'copyright']):
+                                    content_blocks.append(text)
+                            
+                            if content_blocks:
+                                # 가장 긴 텍스트 블록 선택
+                                longest_block = max(content_blocks, key=len)
+                                raw_description = longest_block
+                                success = True
+                                logger.info(f"[한경] 긴 텍스트 블록 추출 성공: {link} - 길이: {len(raw_description)}")
+                    if article_body:
+                        # 기사 본문 영역 찾기 성공
+                        logger.info(f"[한경] 본문 영역 발견: {link} - HTML 길이: {len(str(article_body))}")
+                        
+                        # 한국경제 특수 처리: br 태그를 줄바꿈으로 대체
+                        # 1. article_body 내의 HTML 문자열 가져오기
+                        html_content = str(article_body)
+                        
+                        # <br> 또는 <br/> 태그를 줄바꿈으로 변환
+                        html_content = re.sub(r'<br\s*/?>\s*<br\s*/?>|<br\s*/>', '\n', html_content)
+                        
+                        # 수정된 HTML로 다시 파싱
+                        soup_body = BeautifulSoup(html_content, 'html.parser')
+                        
+                        # 사용하지 않는 요소 제거 (캡션, 광고, 사진 설명 등)
+                        for tag in soup_body.select('figcaption, .figure-caption, .ad_wrap, .ad_box, .caption, aside'):
+                            tag.decompose()
+                        
+                        # 문단 추출 전략 1: 직접 br 태그가 있는 텍스트 블록 찾기
+                        main_text_blocks = []
+                        for text_block in soup_body.findAll(text=True):
+                            if not text_block.parent.name in ['style', 'script', 'head', 'meta']:
+                                # 텍스트가 충분히 길고 의미 있는 경우만 추가
+                                cleaned_text = text_block.strip()
+                                if len(cleaned_text) > 30:
+                                    main_text_blocks.append(cleaned_text)
+                        
+                        if main_text_blocks and len('\n\n'.join(main_text_blocks)) > 300:
+                            raw_description = '\n\n'.join(main_text_blocks)
+                            success = True
+                            logger.info(f"[한경] 텍스트 블록 추출 성공: {link} - 길이: {len(raw_description)}")
+                            
+                        # 문단 추출 전략 2: p 태그 중심으로 추출
+                        if not success or len(raw_description) < 300:
+                            paragraphs = soup_body.select('p')
+                            if paragraphs and len(paragraphs) >= 2:
+                                paragraph_texts = [p.get_text().strip() for p in paragraphs 
+                                                if p.get_text().strip() and len(p.get_text().strip()) > 20]
+                                raw_description = '\n\n'.join(paragraph_texts)
+                                
+                                if len(raw_description) > 300:
+                                    success = True
+                                    logger.info(f"[한경] 기사 p 태그 추출 성공: {link} - 길이: {len(raw_description)}")
+                        
+                        # 문단 추출 전략 3: 전체 텍스트에서 줄바꿈으로 구분하기
+                        if not success or len(raw_description) < 300:
+                            # 전체 텍스트 가져오기
+                            full_text = soup_body.get_text().strip()
+                            
+                            # 줄바꿈으로 문단 구분
+                            paragraphs = [p.strip() for p in re.split(r'\n+', full_text) if p.strip()]
+                            valid_paragraphs = [p for p in paragraphs if len(p) > 20]
+                            
+                            if valid_paragraphs:
+                                raw_description = '\n\n'.join(valid_paragraphs)
+                                success = True
+                                logger.info(f"[한경] 전체 텍스트 문단 분할 성공: {link} - 길이: {len(raw_description)}")
+                            else:
+                                # 마지막 수단: 전체 텍스트 그대로 사용
+                                raw_description = full_text
+                                if len(raw_description) > 200:
+                                    success = True
+                                    logger.info(f"[한경] 전체 텍스트 사용: {link} - 길이: {len(raw_description)}")
+
+                        # 이미 위 코드에서 success 설정이 완료되었음
+                except Exception as e:
+                    logger.error(f"[한경] 특화 크롤링 실패: {link} - {e}")
+            
+            # 방법 3: 비상용 - 둘 다 실패하면 RSS에서 제공한 요약문 사용
+            if not success and summary and len(summary) > 100:
+                logger.warning(f"[한경] 크롤링 실패, RSS 요약문 사용: {link}")
+                raw_description = summary
+                success = True
+            
+            # 여전히 실패하면 스킵
+            if not success or len(raw_description) < 50:
+                logger.error(f"[한경] 본문 크롤링 완전 실패: {link}")
                 continue
 
             # ④ 사진 출처(“사진=…”) 제거
@@ -262,7 +531,7 @@ def fetch_kor_rss_news():
             seen_hashes.add(item['article_hash'])
 
     # (2) 최대 20개만 선택 (원하는 만큼 변경 가능)
-    MAX_KOR = 20
+    MAX_KOR = 50
     limited_items = unique_items[:MAX_KOR]
 
     df = pd.DataFrame(limited_items)
@@ -283,13 +552,18 @@ def fetch_eng_rss_news():
     rss_urls = [
         "https://www.cnbc.com/id/20910258/device/rss/rss.html",  # Finance
         "https://www.cnbc.com/id/10000664/device/rss/rss.html",  # Economy
-        "https://www.cnbc.com/id/10000115/device/rss/rss.html"   # Business
+        "https://www.cnbc.com/id/10000115/device/rss/rss.html",  # Business
+        "https://www.cnbc.com/id/19854910/device/rss/rss.html",  # Investing
+        "https://www.cnbc.com/id/10000946/device/rss/rss.html",  # Markets
+        "https://www.cnbc.com/id/20409666/device/rss/rss.html",  # Real Estate
+        "https://www.cnbc.com/id/15839069/device/rss/rss.html",  # Technology
+        "https://www.cnbc.com/id/15839135/device/rss/rss.html"   # Finance/Banks
     ]
 
-    # 항상 “지금으로부터 3일 전”을 기준으로 삼는다
+    # 항상 “지금으로부터 7일 전”을 기준으로 삼는다
     now = datetime.now()
-    last_saved = now - timedelta(days=3)
-    logger.info(f"CNBCRSS: 지난 3일 기준(3일 전 시각) → {last_saved}")
+    last_saved = now - timedelta(days=7)
+    logger.info(f"CNBCRSS: 지난 7일 기준(7일 전 시각) → {last_saved}")
 
     # 영어 키워드 목록 (필요하다면 더 확장)
     finance_terms_en = [
@@ -336,15 +610,156 @@ def fetch_eng_rss_news():
             if not any(term in combined_title_summary for term in finance_terms_en):
                 continue
 
-            # ③ 본문 크롤링
-            try:
-                article = Article(link, language='en')
-                article.download()
-                article.parse()
-                raw_content_en = article.text.strip()
-            except Exception as e:
-                logger.error(f"[CNBC] 본문 크롤링 실패: {link} - {e}")
-                continue
+            # ③ 본문 크롤링 - newspaper 라이브러리 시도
+            max_retries = 3
+            retry_count = 0
+            raw_content_en = ""
+            success = False
+            
+            # 1. newspaper 라이브러리 시도 (최대 3회)
+            while retry_count < max_retries and not success:
+                try:
+                    article = Article(link, language='en')
+                    article.download()
+                    time.sleep(0.5)  # 다운로드 후 짧은 대기
+                    article.parse()
+                    raw_content_en = article.text.strip()
+                    
+                    # 내용이 충분히 있으면 성공
+                    if len(raw_content_en) > 500:  # 더 긴 내용을 요구 (500자 이상)
+                        success = True
+                        logger.info(f"[CNBC] newspaper 크롤링 성공: {link} - 길이: {len(raw_content_en)}")
+                    else:
+                        logger.warning(f"[CNBC] 본문이 너무 짧음, 재시도 {retry_count+1}/3: {link} - 길이: {len(raw_content_en)}")
+                except Exception as e:
+                    logger.error(f"[CNBC] newspaper 크롤링 실패, 재시도 {retry_count+1}/3: {link} - {e}")
+                
+                retry_count += 1
+                time.sleep(1)  # 재시도 전 대기
+            
+            # 2. newspaper 실패 시 BeautifulSoup 직접 크롤링 시도
+            if not success:
+                logger.info(f"[CNBC] BeautifulSoup 크롤링 시도: {link}")
+                try:
+                    import requests
+                    from bs4 import BeautifulSoup
+                    import re
+                    
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    }
+                    response = requests.get(link, headers=headers, timeout=10)
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # CNBC 기사 구조에 맞는 선택자들 시도
+                    selectors = [
+                        '.ArticleBody-articleBody', '.group', '.article-main', '.article-text',
+                        '.article__content', '.article-body__content', '.ArticleBody-subtitle',
+                        '.RenderKeyPoints-list', '.ArticleBody-wrapper', '.content', 
+                        '[data-module="ArticleBody"]', '.cnbc-body'
+                    ]
+                    
+                    article_body = None
+                    # 각 선택자 시도
+                    for selector in selectors:
+                        elements = soup.select(selector)
+                        if elements:
+                            for element in elements:
+                                text = element.get_text().strip()
+                                if len(text) > 300:  # 충분히 긴 텍스트면 채택
+                                    article_body = element
+                                    logger.info(f"[CNBC] 선택자 '{selector}'로 본문 발견")
+                                    break
+                        if article_body:
+                            break
+                    
+                    if article_body:
+                        logger.info(f"[CNBC] 본문 영역 발견: {link} - HTML 길이: {len(str(article_body))}")
+                        
+                        # br 태그를 줄바꿈으로 처리하기 위한 특수 처리
+                        html_content = str(article_body)
+                        html_content = re.sub(r'<br\s*/?>\s*<br\s*/?>|<br\s*/>', '\n', html_content)
+                        
+                        # 수정된 HTML 다시 파싱
+                        soup_body = BeautifulSoup(html_content, 'html.parser')
+                        
+                        # 사용하지 않는 요소 제거 (캡션, 광고, 사진 설명 등)
+                        for tag in soup_body.select('figcaption, .figure-caption, .ad, .inline-media-container, .caption, aside'):
+                            tag.decompose()
+                        
+                        # 문단 추출 1: 텍스트 블록 찾기
+                        main_text_blocks = []
+                        for text_block in soup_body.findAll(text=True):
+                            if not text_block.parent.name in ['style', 'script', 'head', 'meta']:
+                                cleaned_text = text_block.strip()
+                                if len(cleaned_text) > 40 and not any(term in cleaned_text.lower() for term in ['cookie', 'subscribe', 'newsletter', 'copyright', 'rights reserved']):
+                                    main_text_blocks.append(cleaned_text)
+                        
+                        if main_text_blocks and len('\n\n'.join(main_text_blocks)) > 300:
+                            raw_content_en = '\n\n'.join(main_text_blocks)
+                            success = True
+                            logger.info(f"[CNBC] 텍스트 블록 추출 성공: {link} - 길이: {len(raw_content_en)}")
+                        
+                        # 문단 추출 2: p 태그 중심으로 추출
+                        if not success or len(raw_content_en) < 300:
+                            paragraphs = soup_body.select('p')
+                            if paragraphs and len(paragraphs) >= 2:
+                                paragraph_texts = [p.get_text().strip() for p in paragraphs 
+                                                 if p.get_text().strip() and len(p.get_text().strip()) > 20]
+                                raw_content_en = '\n\n'.join(paragraph_texts)
+                                
+                                if len(raw_content_en) > 300:
+                                    success = True
+                                    logger.info(f"[CNBC] p 태그 추출 성공: {link} - 길이: {len(raw_content_en)}")
+                        
+                        # 문단 추출 3: 전체 텍스트 처리
+                        if not success or len(raw_content_en) < 300:
+                            # 전체 텍스트에서 줄바꿈 처리
+                            full_text = soup_body.get_text().strip()
+                            paragraphs = [p.strip() for p in re.split(r'\n+', full_text) if p.strip()]
+                            valid_paragraphs = [p for p in paragraphs if len(p) > 20]
+                            
+                            if valid_paragraphs:
+                                raw_content_en = '\n\n'.join(valid_paragraphs)
+                                success = True
+                                logger.info(f"[CNBC] 전체 텍스트 줄바꿈 분할 성공: {link} - 길이: {len(raw_content_en)}")
+                    
+                    # 본문 영역을 찾지 못한 경우 긴 p 태그들 추출 시도
+                    if not success:
+                        paragraphs = soup.select('p')
+                        valid_paragraphs = [p.get_text().strip() for p in paragraphs 
+                                          if p.get_text().strip() and len(p.get_text().strip()) > 50]
+                        
+                        if valid_paragraphs and len('\n\n'.join(valid_paragraphs)) > 300:
+                            raw_content_en = '\n\n'.join(valid_paragraphs)
+                            success = True
+                            logger.info(f"[CNBC] 모든 p 태그 추출 성공: {link} - 길이: {len(raw_content_en)}")
+                        else:
+                            # 마지막 방법: 긴 텍스트 블록 찾기
+                            content_blocks = []
+                            for tag in soup.select('div, article, section'):
+                                text = tag.get_text().strip()
+                                if len(text) > 300 and not any(term in text.lower() for term in ['cookie', 'javascript', 'copyright']):
+                                    content_blocks.append(text)
+                            
+                            if content_blocks:
+                                longest_block = max(content_blocks, key=len)
+                                raw_content_en = longest_block
+                                success = True
+                                logger.info(f"[CNBC] 긴 텍스트 블록 추출 성공: {link} - 길이: {len(raw_content_en)}")
+                
+                except Exception as e:
+                    logger.error(f"[CNBC] BeautifulSoup 크롤링 실패: {link} - {e}")
+            
+            # 3. 모든 시도 후에도 내용이 없으면 RSS 요약으로 대체
+            if not success or len(raw_content_en) < 100:
+                # RSS 피드의 요약문 사용 (더 이상의 fallback)
+                if summary_en and len(summary_en) > 50:
+                    raw_content_en = summary_en
+                    logger.warning(f"[CNBC] 크롤링 실패로 RSS 요약문 사용: {link} - 길이: {len(raw_content_en)}")
+                else:
+                    logger.error(f"[CNBC] 본문 크롤링 최종 실패: {link}")
+                    continue
 
             # ④ 사진 출처(“사진=...”) 제거 (한국어로 번역하지 않은 순수 영어 본문에도 혹시 포함될 수 있으므로 처리)
             content_en = clean_description(raw_content_en)
@@ -398,7 +813,7 @@ def fetch_eng_rss_news():
             seen_hashes.add(item['article_hash'])
 
     # (2) 최대 20개만 선택 (필요 시 변경 가능)
-    MAX_ENG = 20
+    MAX_ENG = 50
     limited_items = unique_items[:MAX_ENG]
 
     df = pd.DataFrame(limited_items)
@@ -475,10 +890,22 @@ def preprocess_news_with_claude(news_id, title, description):
     """
     기사 내용을 기반으로 Claude API를 이용해 금융/경제 관련성 검증, 요약 및 키워드 추출
     """
-    # 본문 길이 기준을 50자로 완화하여 짧은 기사도 시도해 봅니다.
-    if not description or len(description) < 1000:
-        logger.warning(f"기사 ID {news_id}의 본문이 너무 짧아 처리할 수 없습니다. (길이: {len(description) if description else 0})")
-        return {"summary": "", "keywords": []}
+    # 금융 키워드 목록 (finance_terms) 가져오기
+    finance_terms = [
+        "금융", "증권", "주식", "ETF", "채권",
+        "대출", "대차", "수익", "투자", "가상자산",
+        "비트코인", "코스피", "코스닥", "국채", "원자재",
+        "부동산"
+    ]
+    
+    # 본문 길이 기준을 50자로 완화하여 짧은 기사도 처리합니다.
+    if not description or len(description) < 50:
+        logger.warning(f"기사 ID {news_id}의 본문이 너무 짧아 기본값으로 처리합니다. (길이: {len(description) if description else 0})")
+        # 짧은 본문에도 기본 요약과 키워드 제공
+        return {
+            "summary": f"{title}. 이 기사는 금융/경제와 관련된 정보를 담고 있습니다.",
+            "keywords": "금융, 투자, 시장"
+        }
 
     prompt = (
         f"""
@@ -487,17 +914,18 @@ def preprocess_news_with_claude(news_id, title, description):
     
         기사 제목: {title}\n\n
         기사 내용: {description[:10000]}\n\n
-    
-        1. 먼저 이 기사가 경제, 금융, 투자 등에 실질적으로 영향을 미치는 내용을 담고 있는지 평가해주세요.
-        2. 이 기사에서 금융 이해력이 부족한 사람들이 배울 수 있는 가장 핵심적인 금융/경제 키워드 3개를 추출해주세요.
-        3. 금융 지식이 부족한 사람도 이해할 수 있도록 기사 내용을 불릿포인트 형식으로 명확하게 요약해주세요.
-    
-        키워드는 반드시 기사의 가장 핵심적인 금융/경제 용어나 개념을 명사 형태로만 생성해주세요.
+        
+        다음 작업을 진행해주세요:
+        1. 이 기사가 경제, 금융, 투자 등에 실질적으로 영향을 미치는 내용을 담고 있는지 평가해주세요.
+        2. 금융 지식이 부족한 사람도 이해할 수 있도록 기사 내용을 불릿포인트 형식으로 명확하게 요약해주세요.
+        3. 이 기사에서 가장 핵심적인 금융/경제 키워드를 3-5개 추출해주세요. 키워드는 쉼표(,)로 구분된 문자열 형태로 작성해주세요.
+        
+        키워드는 반드시 다음 목록 중에서 1개 이상을 포함해야 합니다: {', '.join(finance_terms)}
     
         반드시 다음 JSON 형식으로 응답해주세요:
         {{
             "summary": "기사 요약",
-            "keywords": ["키워드1", "키워드2", "키워드3"]
+            "keywords": "키워드1, 키워드2, 키워드3"
         }}
     
         중요: 오직 JSON 형식만 제공해주세요. 다른 텍스트나 설명은 포함하지 마세요.
@@ -507,24 +935,33 @@ def preprocess_news_with_claude(news_id, title, description):
     result = call_claude_api(prompt, max_tokens=1000, temperature=0.0)
     if not result or not isinstance(result, dict):
         logger.error(f"기사 ID {news_id}: Claude 응답이 없거나 JSON 형식이 아닙니다.")
-        return {"summary": "", "keywords": []}
+        return {
+            "summary": f"{title}. 이 기사는 금융/경제와 관련된 중요한 정보를 다루고 있습니다.", 
+            "keywords": "금융, 투자, 시장"
+        }
 
-    # Claude가 돌려준 값을 그대로 사용
+    # Claude가 돌려준 값을 처리
     summary = result.get("summary", "")
-    keywords = result.get("keywords", [])
+    keywords = result.get("keywords", "")
 
-    # 응답이 str/리스트 형태가 아닌 경우에는 빈 값 처리
-    if not isinstance(summary, str):
-        logger.warning(f"기사 ID {news_id}: summary 필드가 문자열이 아닙니다 → 빈 문자열로 설정")
-        summary = ""
-    if not isinstance(keywords, list):
-        logger.warning(f"기사 ID {news_id}: keywords 필드가 리스트가 아닙니다 → 빈 리스트로 설정")
-        keywords = []
-
-    if summary == "":
-        logger.warning(f"기사 ID {news_id}: summary가 비어 있습니다.")
-    if len(keywords) == 0:
-        logger.warning(f"기사 ID {news_id}: keywords 리스트가 비어 있습니다.")
+    # 응답이 적절한 형태가 아닌 경우 기본값으로 대체
+    if not isinstance(summary, str) or not summary:
+        logger.warning(f"기사 ID {news_id}: summary 필드가 비어있거나 문자열이 아닙니다 → 기본값으로 설정")
+        summary = f"{title}. 이 기사는 금융/경제와 관련된 중요한 정보를 다루고 있습니다."
+    
+    # keywords가 리스트인 경우 문자열로 변환
+    if isinstance(keywords, list):
+        keywords = ", ".join(keywords)
+    
+    # keywords가 문자열이 아니거나 비어있는 경우 기본값 설정
+    if not isinstance(keywords, str) or not keywords:
+        logger.warning(f"기사 ID {news_id}: keywords 필드가 비어있거나 문자열이 아닙니다 → 기본값으로 설정")
+        keywords = "금융, 투자, 시장"
+        
+    # 키워드에 finance_terms의 항목이 하나도 없으면 추가
+    if not any(term in keywords for term in finance_terms):
+        logger.warning(f"기사 ID {news_id}: keywords에 finance_terms 항목이 없습니다 → 추가")
+        keywords = f"{keywords}, 금융, 투자"
 
     return {"summary": summary, "keywords": keywords}
 
@@ -677,11 +1114,11 @@ def generate_and_save_quizzes(news_ids):
             if processed:
                 try:
                     cursor.execute(
-                        "UPDATE news SET summary=%s, keywords=%s WHERE news_id=%s",
-                        (processed["summary"],
-                         json.dumps(processed["keywords"], ensure_ascii=False),  # ← 한글 그대로 저장
-                         news_id)
-                    )
+                    "UPDATE news SET summary=%s, keywords=%s WHERE news_id=%s",
+                    (processed["summary"],
+                     processed["keywords"],  # 이미 문자열 형태로 변경했으므로 그대로 저장
+                     news_id)
+                )
 
                     conn.commit()
                     processed_cnt += 1
