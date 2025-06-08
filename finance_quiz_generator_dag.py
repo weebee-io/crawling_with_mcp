@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-금융 퀴즈 생성기 DAG (리팩토링 버전)
+금융 퀴즈 생성기 DAG
 
 이 DAG는 다음 작업을 수행합니다:
 1. Claude API를 사용하여 금융/경제 학습용 퀴즈 생성
-2. 2지선다 및 4지선다 유형으로 퀴즈 분류
+2. 2지선다 유형으로 퀴즈 생성
 3. 기초(BRONZE), 일반(SILVER), 고급(GOLD) 난이도별로 각각 태스크 생성
 4. 생성된 퀴즈를 데이터베이스에 저장
 """
@@ -169,20 +169,11 @@ def generate_finance_quiz(subject_id, quiz_type="4지선다", num_quizzes=5, dif
     system_prompt = "당신은 금융·경제 교육 콘텐츠를 생성하는 AI입니다. 학습자의 이해를 돕는 명확하고 교육적인 퀴즈를 생성합니다."
 
     # 선택지 형식 정의
-    if quiz_type == "2지선다":
-        choice_format = """
-        "choice_a": "첫 번째 선택지",
-        "choice_b": "두 번째 선택지",
-        "correct_ans": "1 또는 2 (정답 선택지)",
-        """
-    else:
-        choice_format = """
-        "choice_a": "첫 번째 선택지",
-        "choice_b": "두 번째 선택지",
-        "choice_c": "세 번째 선택지",
-        "choice_d": "네 번째 선택지",
-        "correct_ans": "1, 2, 3, 4 중 정답 선택지",
-        """
+    choice_format = """
+    "choice_a": "첫 번째 선택지",
+    "choice_b": "두 번째 선택지",
+    "correct_ans": "1 또는 2 (정답 선택지)",
+    """
 
     # 프롬프트 구성 (기존 로직 그대로 두되 rank/level만 동적으로 변경)
     user_prompt = f"""
@@ -288,58 +279,41 @@ def save_quizzes_to_db(quizzes, quiz_type):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         for quiz in quizzes:
+            quiz_id = None
             try:
-                # (1) quiz 테이블에 기본 정보 삽입
+                # quiz 테이블에 기본 정보 삽입
                 cursor.execute(
                     '''
                     INSERT INTO quiz
-                    (content, quiz_level, quiz_rank, subject, quiz_type)
-                    VALUES (%s, %s, %s, %s, %s)
+                    (content, quiz_level, quiz_rank, subject)
+                    VALUES (%s, %s, %s, %s)
                     ''',
                     (
                         quiz["content"],
                         quiz.get("quiz_level", 50),
                         quiz.get("quiz_rank", "SILVER"),
-                        quiz.get("subject", 1),
-                        quiz_type
+                        quiz.get("subject", 1)
                     )
                 )
                 quiz_id = cursor.lastrowid
 
-                # (2) 선택지 테이블에 삽입
-                if quiz_type == "4지선다" and "choice_c" in quiz and "choice_d" in quiz:
-                    cursor.execute(
-                        '''
-                        INSERT INTO quiz_option_4
-                        (quiz_id, choice_a, choice_b, choice_c, choice_d, correct_ans)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        ''',
-                        (
-                            quiz_id,
-                            quiz["choice_a"],
-                            quiz["choice_b"],
-                            quiz["choice_c"],
-                            quiz["choice_d"],
-                            quiz["correct_ans"]
-                        )
+                # 선택지 테이블에 삽입 (2지선다만 사용)
+                cursor.execute(
+                    '''
+                    INSERT INTO quiz_option_2
+                    (quiz_id, choice_a, choice_b, correct_ans)
+                    VALUES (%s, %s, %s, %s)
+                    ''',
+                    (
+                        quiz_id,
+                        quiz["choice_a"],
+                        quiz["choice_b"],
+                        quiz["correct_ans"]
                     )
-                else:  # 2지선다
-                    cursor.execute(
-                        '''
-                        INSERT INTO quiz_option_2
-                        (quiz_id, choice_a, choice_b, correct_ans)
-                        VALUES (%s, %s, %s, %s)
-                        ''',
-                        (
-                            quiz_id,
-                            quiz["choice_a"],
-                            quiz["choice_b"],
-                            quiz["correct_ans"]
-                        )
-                    )
+                )
                 saved_count += 1
             except Exception as e:
-                logger.error(f"퀴즈 저장 중 오류 (quiz_id={quiz_id}): {e}")
+                logger.error(f"퀴즈 저장 중 오류 {'' if quiz_id is None else f'(quiz_id={quiz_id})'}: {e}")
                 continue
         conn.commit()
 
@@ -389,7 +363,7 @@ default_args = {
 dag = DAG(
     'weebee_quiz_generator2',
     default_args=default_args,
-    description='금융/경제 퀴즈 생성 파이프라인 (리팩토링 버전)',
+    description='금융/경제 2지선다 퀴즈 생성 파이프라인',
     schedule_interval=None,  # 수동 트리거만 가능
     catchup=False
 )
@@ -397,11 +371,11 @@ dag = DAG(
 # ───────────────────────────────────────────────────────────────────────────────
 # 1) 동적으로 태스크 생성
 # ───────────────────────────────────────────────────────────────────────────────
-# 50문제 생성
+# 각 난이도별 100문제 생성
 TOTAL_PER_DIFFICULTY = 100
-# 무조건 모든 문제를 2지선다로 생성
+# 모든 문제를 2지선다로 생성
 SPLIT = {
-    "2지선다": TOTAL_PER_DIFFICULTY  # 50개 전부 2지선다로 생성
+    "2지선다": TOTAL_PER_DIFFICULTY
 }
 
 # 본격적으로 태스크를 담아둘 딕셔너리
@@ -410,7 +384,7 @@ tasks = {}
 for subj in SUBJECT_ORDER:
     for diff in ["BRONZE", "SILVER", "GOLD"]:
         for qtype in QUIZ_TYPES:
-            task_id = f"gen_{QUIZ_SUBJECTS[subj]}_{diff.lower()}_{'4opt' if qtype=='4지선다' else '2opt'}"
+            task_id = f"gen_{QUIZ_SUBJECTS[subj]}_{diff.lower()}_2opt"
             tasks[(subj, diff, qtype)] = PythonOperator(
                 task_id=task_id,
                 python_callable=generate_and_save_quizzes,
@@ -425,7 +399,7 @@ for subj in SUBJECT_ORDER:
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 2) 생성된 태스크들 간에 의존 관계 설정
-#    - 동일 주제 내: BRONZE → SILVER → GOLD 순서, 각 난이도 내에서 4지선다 → 2지선다
+#    - 동일 주제 내: BRONZE → SILVER → GOLD 순서
 #    - 주제 간: finance → invest → credit 순서
 # ───────────────────────────────────────────────────────────────────────────────
 
